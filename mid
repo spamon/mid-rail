@@ -337,6 +337,11 @@ def generate_shutter_worksheet(shutter_data, output_path, delivery_option, is_fi
         ("Handles By:", "_____________________"),
         ("Brackets Size:", "_____________________"),
         ("Bracket Quantity:", "_____________________"),
+        ("", ""),  # Blank line for spacing
+        ("Quality Control:", ""),
+        ("□ Shutter Checked:", "_____________________"),
+        ("□ All Caps Fitted:", "_____________________"),
+        ("□ Top/Bottom Holes Punched:", "_____________________"),
     ]
 
     # Add fitting instructions section if it's the first sheet
