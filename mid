@@ -590,28 +590,42 @@ import os
 
 def print_excel_file(file_path):
     try:
-        # Create Excel application object
+        if not file_path.lower().endswith('.xlsx'):
+            logging.info(f"Skipping non-Excel file: {file_path}")
+            return
+            
         excel = win32com.client.Dispatch("Excel.Application")
-        excel.Visible = False  # Don't show Excel
+        excel.Visible = False
+        excel.DisplayAlerts = False  # Disable alerts
         
-        # Open workbook
         wb = excel.Workbooks.Open(os.path.abspath(file_path))
+        ws = wb.Worksheets(1)
         
-        # Set print area to used range
-        ws = wb.Worksheets(1)  # First worksheet
-        ws.PageSetup.Zoom = False  # Disable zoom
-        ws.PageSetup.FitToPagesWide = 1  # Fit to 1 page wide
-        ws.PageSetup.FitToPagesTall = 1  # Fit to 1 page tall
+        # Explicitly set print area to used range
+        ws.PageSetup.PrintArea = ws.UsedRange.Address
+        ws.PageSetup.Zoom = False
+        ws.PageSetup.FitToPagesWide = 1
+        ws.PageSetup.FitToPagesTall = 1
+        ws.PageSetup.CenterHorizontally = True
+        ws.PageSetup.CenterVertically = True
         
-        # Print
         printer_name = win32print.GetDefaultPrinter()
-        ws.PrintOut(ActivePrinter=printer_name)
+        ws.PrintOut(
+            Copies=1,
+            ActivePrinter=printer_name,
+            PrintToFile=False,
+            Collate=True
+        )
         
-        # Close without saving
+        # Ensure everything is closed properly
         wb.Close(SaveChanges=False)
         excel.Quit()
         
-        logging.info(f"Sent Excel file to printer: {file_path}")
+        # Force Excel to quit
+        del wb
+        del excel
+        
+        logging.info(f"Printed Excel file: {file_path}")
         
     except Exception as e:
         logging.error(f"Error printing Excel file {file_path}: {str(e)}")
