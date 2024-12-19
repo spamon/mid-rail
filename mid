@@ -1,0 +1,612 @@
+import xml.etree.ElementTree as ET
+import os
+import logging
+import re
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.worksheet.page import PageMargins
+from datetime import datetime, timedelta
+import json
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def calculate_due_date(delivery_option):
+    today = datetime.today()
+    delivery_option = delivery_option.strip().lower()
+    print(f"Normalized Delivery Option: {delivery_option}")
+
+    if "express delivery 7 - 10 working days" in delivery_option:
+        print("Express delivery option detected.")
+        working_days_needed = 7
+        due_date = today
+        while working_days_needed > 0:
+            due_date += timedelta(days=1)
+            print(f"Checking date: {due_date.strftime('%d/%m/%Y')}, Day of Week: {due_date.strftime('%A')}")
+            if due_date.weekday() < 5:  # Monday=0, Sunday=6
+                working_days_needed -= 1
+                print(f"Working day counted. {working_days_needed} more needed.")
+    else:
+        print("Standard delivery or no selection detected. Defaulting to 3 weeks.")
+        due_date = today + timedelta(weeks=3)
+    
+    print(f"Final calculated due date: {due_date.strftime('%d/%m/%Y')}")
+    return due_date.strftime("%d/%m/%Y")
+
+def extract_numeric(value):
+    if value is None:
+        return "0"
+    match = re.search(r'\d+\.?\d*', str(value))
+    return match.group() if match else "0"
+
+def convert_to_mm(value):
+    if value is None:
+        return "0"
+    
+    # Convert value to string and clean it
+    value_str = str(value).lower().strip()
+    
+    # Early return if empty
+    if not value_str:
+        return "0"
+    
+    try:
+        # Check for inches notation
+        if '"' in value_str or 'inch' in value_str or 'inches' in value_str:
+            # Extract numeric value
+            numeric_value = ''.join(char for char in value_str if char.isdigit() or char == '.')
+            # Convert inches to mm (1 inch = 25.4 mm)
+            mm_value = float(numeric_value) * 25.4
+            return str(round(mm_value))
+        
+        # For non-inch values
+        numeric_value = ''.join(char for char in value_str if char.isdigit() or char == '.')
+        float_value = float(numeric_value)
+        
+        # If value is less than 200 and not in inches, assume it's in cm
+        if float_value < 200:
+            float_value *= 10
+            
+        return str(round(float_value))
+        
+    except ValueError:
+        logging.warning(f"Invalid measurement value: {value}")
+        return "0"
+
+def calculate_custom_handle_rebate_position(handle_position, handle_location):
+    handle_position = handle_position.lower()
+    handle_location = handle_location.lower()
+
+    if handle_position in ['centre', 'center', 'middle'] or handle_location in ['centre', 'center', 'middle']:
+        return 'centre'
+
+    if handle_location in ['bottom', 'left', 'right']:
+        numeric_match = re.search(r'\d+\.?\d*', handle_position)
+        if numeric_match:
+            try:
+                position_value = float(numeric_match.group())
+                # Convert to mm if it's likely in cm
+                if position_value < 100:
+                    position_value *= 10
+                    
+                # Different handling for bottom vs side handles
+                if handle_location == 'bottom':
+                    position_value = int(position_value) - 25  # Subtract 25mm for bottom handles
+                else:
+                    position_value = int(position_value) + 23  # Add 23mm for left/right handles
+                    
+                return str(position_value)
+            except ValueError:
+                logging.warning(f"Invalid handle position value for {handle_location} handle: {handle_position}")
+                return 'Invalid'
+
+    numeric_match = re.search(r'\d+\.?\d*', handle_position)
+    if numeric_match:
+        try:
+            position_value = float(numeric_match.group())
+            # Convert to mm if it's likely in cm
+            if position_value < 100:
+                position_value *= 10
+            position_value = int(position_value) + 23
+            return str(position_value)
+        except ValueError:
+            logging.warning(f"Invalid handle position value: {handle_position}")
+            return 'Invalid'
+    else:
+        logging.warning(f"No numeric value found in handle position: {handle_position}")
+        return 'Invalid'
+
+def calculate_shutter_components(shutter):
+    width = int(convert_to_mm(shutter.get('Width', '0')))
+    length = int(convert_to_mm(shutter.get('Length', '0')))
+    
+    num_panels = int(shutter.get('Number Of Panels', '1'))
+    fixed_gap = 83  # Approx fixed gap
+
+    if num_panels == 2:
+        top_bottom_rail_width = (width - 150) / 2
+        louver_width = top_bottom_rail_width - 3
+        louver_info = [
+            {"Louver Width": round(louver_width, 1), "Top Bottom Rail Width": round(top_bottom_rail_width, 1)},
+            {"Louver Width": round(louver_width, 1), "Top Bottom Rail Width": round(top_bottom_rail_width, 1)},
+        ]
+    elif num_panels == 3:
+        top_bottom_rail_width = (width / 3) - fixed_gap
+        louver_width = top_bottom_rail_width - 3
+        louver_info = [
+            {"Louver Width": round(louver_width, 1), "Top Bottom Rail Width": round(top_bottom_rail_width, 1)},
+            {"Louver Width": round(louver_width, 1), "Top Bottom Rail Width": round(top_bottom_rail_width, 1)},
+            {"Louver Width": round(louver_width, 1), "Top Bottom Rail Width": round(top_bottom_rail_width, 1)},
+        ]
+    else:
+        louver_width = width - 54
+        top_bottom_rail_width = width - 51
+        louver_info = [
+            {"Louver Width": round(louver_width, 1), "Top Bottom Rail Width": round(top_bottom_rail_width, 1)},
+        ]
+
+    astragal_height_top = length + 46
+    tilt_bar_size = astragal_height_top - 138
+
+    louver_height = 63  # 63mm per louver
+    estimated_louvers = round(length / louver_height)
+
+    handle_rebate_position = shutter.get('Handle Location', 'None')
+    if handle_rebate_position.lower() != 'none':
+        handle_position = shutter.get('Handle Position', '0')
+        custom_handle_rebate_position = calculate_custom_handle_rebate_position(handle_position, handle_rebate_position)
+    else:
+        custom_handle_rebate_position = 'N/A'
+
+    # Calculate mid rail position if midrail is present
+    has_midrail = shutter.get('Shutter Midrail', 'No').lower() == 'yes'
+    if has_midrail:
+        mid_rail_position = (length // 2) + 23
+    else:
+        mid_rail_position = 0
+
+    return {
+        "Panel Configuration": shutter.get('Tilt Control Side', 'L')[0].upper(),
+        "Rail Size": "50mm",
+        "Colour": shutter.get('ShutterColour', '').upper(),
+        "Frame Style": "",
+        "Length": length,
+        "Window Handle Position": shutter.get('Handle Location', 'None'),
+        "Window Depth": extract_numeric(shutter.get('Bead Depth', '22')),
+        "Louver Info": louver_info,
+        "Stiles Height Top": astragal_height_top,
+        "Astragal Size Top": astragal_height_top,
+        "Tilt Bars": 1.00,
+        "Account Number": "C001268",
+        "Order Number": shutter.get("Order Number", ""),
+        "Shutter Style": "DIVIDER RAIL" if has_midrail else "FULL HEIGHT",
+        "Shutter System": "Urban Shutter Lite - Stiles Only",
+        "Panels Across": shutter.get('Number Of Panels', '1'),
+        "LouverSize": shutter.get('LouvreSize', '63mm'),
+        "Width": width,
+        "Window Handle Centered": shutter.get('WindowHandleCentered', 'No'),
+        "Astragal": "RHOverLH",
+        "Number of Louvers": estimated_louvers,
+        "Number of Rails": 3 if has_midrail else 2,
+        "Stiles Bars Top": 2.00,
+        "Tilt Bar Size Top": tilt_bar_size,
+        "Handle Rebate Position": handle_rebate_position,
+        "Custom Handle Rebate Position": custom_handle_rebate_position,
+        "Has Midrail": has_midrail,
+        "Mid Rail Position": mid_rail_position,
+        "Mid Rail Size": louver_info[0]["Top Bottom Rail Width"] if louver_info else 0
+    }
+
+def generate_shutter_worksheet(shutter_data, output_path, delivery_option, is_first_sheet=False):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Shutter Specification"
+
+    ws.page_margins = PageMargins(left=0.15, right=0.15, top=0.15, bottom=0.15)
+
+    for col in ['A', 'B', 'C', 'D']:
+        ws.column_dimensions[col].width = 23
+
+    header_font = Font(bold=True, size=16)
+    subheader_font = Font(bold=True, size=12)
+    standard_font = Font(size=12)
+    left_alignment = Alignment(horizontal="left", vertical="center")
+
+    # Emerald Blinds title
+    ws.merge_cells('A1:D1')
+    title_cell = ws['A1']
+    title_cell.value = "Emerald Blinds"
+    title_cell.font = header_font
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Due Date and Shipping Type
+    due_date = calculate_due_date(delivery_option)
+    ws.merge_cells('A2:D2')
+    due_date_cell = ws['A2']
+    due_date_cell.value = f"Due Date: {due_date} - Shipping Type: {delivery_option}"
+    due_date_cell.font = subheader_font
+    due_date_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Highlight due date in pink if it's a fast track order
+    pink_fill = PatternFill(start_color="FFC0CB", end_color="FFC0CB", fill_type="solid")
+    if "express delivery" in delivery_option.lower():
+        due_date_cell.fill = pink_fill
+
+    headers = [
+        ("System", "Urban Shutters Perfect Fit Lite"),
+        ("Shutter Number", shutter_data.get('Room Location', '')),
+        ("Name", shutter_data.get('Customer Name', '')),
+        ("Location", shutter_data.get('Blind Location', '')),
+        ("Panel Configuration", shutter_data['Panel Configuration']),
+        ("Rail Size", shutter_data['Rail Size']),
+        ("Colour", shutter_data['Colour']),
+        ("Frame Style", shutter_data['Frame Style']),
+        ("Length", shutter_data['Length']),
+        ("Window Depth", shutter_data['Window Depth']),
+        ("Handle Rebate Position", shutter_data['Handle Rebate Position']),
+        ("Handle Location", "centre" if shutter_data['Custom Handle Rebate Position'] == 'centre' else shutter_data['Custom Handle Rebate Position']),
+        ("Mid Rail", "Yes" if shutter_data['Has Midrail'] else "No"),
+        ("Mid Rail Size", shutter_data['Mid Rail Size'] if shutter_data['Has Midrail'] else "N/A"),
+        ("Louvers", ""),
+        ("Stiles/Tilt", ""),
+        ("Stiles Height Top", shutter_data['Stiles Height Top']),
+        ("Astragal Size Top", shutter_data['Astragal Size Top']),
+        ("Tilt Bars", shutter_data['Tilt Bars']),
+        ("Frames", ""),
+        ("Sundries", "")
+    ]
+
+    for row, (header, value) in enumerate(headers, start=4):
+        ws.cell(row=row, column=1, value=header)
+        ws.cell(row=row, column=2, value=value)
+        ws.cell(row=row, column=1).font = subheader_font
+        ws.cell(row=row, column=1).alignment = left_alignment
+        ws.cell(row=row, column=2).font = standard_font
+        ws.cell(row=row, column=2).alignment = left_alignment
+
+        # Highlight handle information in pink
+        if header in ["Handle Rebate Position", "Handle Location"]:
+            ws.cell(row=row, column=1).fill = pink_fill
+            ws.cell(row=row, column=2).fill = pink_fill
+
+    start_row = 21
+    
+    for index, louver in enumerate(shutter_data['Louver Info'], start=1):
+        ws.cell(row=start_row, column=1, value=f"Louver Width {index}")
+        ws.cell(row=start_row, column=2, value=louver["Louver Width"])
+        ws.cell(row=start_row, column=1).font = subheader_font
+        ws.cell(row=start_row, column=1).alignment = left_alignment
+        ws.cell(row=start_row, column=2).font = standard_font
+        ws.cell(row=start_row, column=2).alignment = left_alignment
+        start_row += 1
+    
+    for index, louver in enumerate(shutter_data['Louver Info'], start=1):
+        ws.cell(row=start_row, column=1, value=f"Top Bottom Rail Width {index}")
+        ws.cell(row=start_row, column=2, value=louver["Top Bottom Rail Width"])
+        ws.cell(row=start_row, column=1).font = subheader_font
+        ws.cell(row=start_row, column=1).alignment = left_alignment
+        ws.cell(row=start_row, column=2).font = standard_font
+        ws.cell(row=start_row, column=2).alignment = left_alignment
+        start_row += 1
+    
+    for index in range(1, len(shutter_data['Louver Info']) + 1):
+        ws.cell(row=start_row, column=1, value=f"Number of Louvers {index}")
+        ws.cell(row=start_row, column=2, value=shutter_data['Number of Louvers'])
+        ws.cell(row=start_row, column=1).font = subheader_font
+        ws.cell(row=start_row, column=1).alignment = left_alignment
+        ws.cell(row=start_row, column=2).font = standard_font
+        ws.cell(row=start_row, column=2).alignment = left_alignment
+        start_row += 1
+
+    right_side_data = [
+        ("Account Number", shutter_data['Account Number']),
+        ("Order Number", shutter_data['Order Number']),
+        ("Shutter Style", shutter_data['Shutter Style']),
+        ("Shutter System", shutter_data['Shutter System']),
+        ("Panels Across", shutter_data['Panels Across']),
+        ("LouverSize", shutter_data['LouverSize']),
+        ("Width", shutter_data['Width']),
+        ("Window Handle Centered", shutter_data['Window Handle Centered']),
+        ("Astragal", shutter_data['Astragal']),
+        ("Number of Rails", shutter_data['Number of Rails']),
+        ("Stiles Bars Top", shutter_data['Stiles Bars Top']),
+        ("Tilt Bar Size Top", shutter_data['Tilt Bar Size Top'])
+    ]
+
+    for row, (header, value) in enumerate(right_side_data, start=4):
+        ws.cell(row=row, column=3, value=header)
+        ws.cell(row=row, column=4, value=value)
+        ws.cell(row=row, column=3).font = subheader_font
+        ws.cell(row=row, column=3).alignment = left_alignment
+        ws.cell(row=row, column=4).font = standard_font
+        ws.cell(row=row, column=4).alignment = left_alignment
+
+    # Add a separator line
+    start_row += 2  # Add some spacing
+    
+    # Create a section for manual entry fields
+    workflow_section = [
+        ("Made By:", "_____________________"),
+        ("Handles By:", "_____________________"),
+        ("Brackets Size:", "_____________________"),
+        ("Bracket Quantity:", "_____________________"),
+    ]
+
+    # Add fitting instructions section if it's the first sheet
+    if is_first_sheet:
+        workflow_section.append(("", ""))  # Add a blank line for spacing
+        workflow_section.append(("Fitting Instructions Required", "_____________________"))
+
+    # Add a header for the workflow section
+    ws.cell(row=start_row, column=1, value="CHECK LIST").font = header_font
+    start_row += 1
+
+    # Add workflow items
+    for header, value in workflow_section:
+        ws.cell(row=start_row, column=1, value=header).font = subheader_font
+        ws.cell(row=start_row, column=2, value=value).font = standard_font
+        ws.cell(row=start_row, column=1).alignment = left_alignment
+        ws.cell(row=start_row, column=2).alignment = left_alignment
+        start_row += 1
+
+    # Adjust column width for writing space
+    ws.column_dimensions['B'].width = 35
+
+    wb.save(output_path)
+
+def extract_order_data(driver, customer_name):
+    if "[Sample]" in driver.page_source:
+        return None, None, None
+
+    table = driver.find_element(By.ID, 'data-table')
+    rows = table.find_elements(By.TAG_NAME, 'tr')
+
+    try:
+        notes_panel = driver.find_element(By.XPATH, '//div[@class="panel panel-primary"]/div[@class="panel-body"]')
+        customer_notes = notes_panel.text.strip()
+    except:
+        customer_notes = "No notes found."
+
+    try:
+        delivery_option_element = driver.find_element(By.XPATH, "//span[contains(., 'EXPRESS SHUTTER DELIVERY:')]/ancestor::div[@class='basket_custom_option']//div")
+        delivery_option = delivery_option_element.text.strip()
+        print(f"Extracted Delivery Option: {delivery_option}")
+    except Exception as e:
+        print(f"Error extracting delivery option: {e}")
+        delivery_option = "- Please Select -"  # Default if not found
+
+    all_product_data = []
+
+    for row in rows[1:]:  # Skip the header row
+        product_data = {'Customer Name': customer_name}
+
+        columns = row.find_elements(By.TAG_NAME, 'td')
+        if len(columns) >= 3:
+            product_name_element = columns[1].find_element(By.TAG_NAME, 'a')
+            product_name = product_name_element.text.strip()
+            product_data['Product Name'] = product_name
+            
+            # Extract shutter color from product name
+            shutter_color = ' '.join(product_name.split()[:2])
+            if shutter_color.lower() in ['arctic white', 'cotton white']:
+                product_data['ShutterColour'] = shutter_color
+            else:
+                product_data['ShutterColour'] = 'COTTON WHITE'  # Default if not found
+            
+            product_data['Quantity'] = columns[2].text.strip()
+
+        product_details = row.find_elements(By.XPATH, './/div[@class="basket_custom_option"]')
+        for detail in product_details:
+            label_element = detail.find_element(By.CLASS_NAME, 'basket_custom_option_label')
+            label = label_element.text.strip(':')
+            value_element = detail.find_element(By.XPATH, './/following-sibling::div')
+            value = value_element.text.strip()
+            product_data[label] = value
+
+            # Add specific check for Shutter Midrail
+            if label == 'Shutter Midrail':
+                product_data['Shutter Midrail'] = value
+
+        if product_data.get('Product Type') == 'Perfect Fit Shutter':
+            width = convert_to_mm(product_data.get('Width', '0'))
+            length = convert_to_mm(product_data.get('Length', '0'))
+            
+            if int(width) >= 215 and int(length) >= 215:
+                product_data['Width'] = width
+                product_data['Drop'] = length
+                all_product_data.append(product_data)
+            else:
+                logging.info(f"Skipping blind with dimensions: Width={width}, Length={length}")
+
+    print(f"Returning data for {customer_name}: {len(all_product_data)} products, {delivery_option} delivery option")
+    
+    # Add this print statement to show the scraped data
+    print("Scraped Data:")
+    for product in all_product_data:
+        print(json.dumps(product, indent=2))
+
+    return all_product_data, customer_notes, delivery_option
+
+def handle_perfect_fit_shutters(order_data, customer_name, delivery_option):
+    try:
+        root = ET.Element("Order")
+        
+        cust_order_ref = f"EM/{customer_name.split()[-1].upper()}"
+        root.set("AccountName", customer_name)
+        root.set("AccountCode", "C001268")
+        root.set("CustOrderRef", cust_order_ref)
+        root.set("CustOrderID", datetime.now().strftime("%Y%m%d"))
+        root.set("OrderDate", datetime.now().strftime("%d/%m/%Y"))
+        root.set("OS", "Platform: Win32NT         Version: 6.2.9200.0")
+        root.set("DeliveryLocationID", "000007567")
+        root.set("DeliveryLocationName", "McGRATHS CARPETS BLINDS &")
+        root.set("USCCVersion", "1.3.0.0")
+        root.set("UrbanShutterOption", "UrbanShutterLiteStilesOnly")
+
+        due_date = calculate_due_date(delivery_option)
+        
+        item_number = 1
+        for shutter in order_data:
+            if shutter.get('Product Type') == 'Perfect Fit Shutter':
+                quantity = int(shutter.get('Quantity', '1'))
+                for _ in range(quantity):
+                    item = ET.SubElement(root, "Item")
+                    
+                    panel_qty = int(shutter.get('Number Of Panels', '1'))
+                    if panel_qty > 1:
+                        valid_configurations = {
+                            2: ["LL", "LR", "RL", "RR"],
+                            3: ["LLL", "RRR", "LRL", "RLR"],
+                            4: ["LLLL", "RRRR", "LLRR", "RLLR"],
+                        }
+                        if panel_qty in valid_configurations:
+                            print(f"Detected {panel_qty} panels. Please choose a configuration:")
+                            print(f"Options: {', '.join(valid_configurations[panel_qty])}")
+                            while True:
+                                panel_config = input("Enter the panel configuration: ").strip().upper()
+                                if panel_config in valid_configurations[panel_qty]:
+                                    break
+                                print("Invalid configuration. Please try again.")
+                        else:
+                            panel_config = "LL"  # Default if no specific config available
+                    else:
+                        panel_config = shutter.get('Tilt Control Side', 'L')[0].upper()
+
+                    item.set("PanelConfiguration", panel_config)
+                    
+                    item.set("ItemNumber", str(item_number))
+                    item.set("PanelQty", str(panel_qty))
+                    shutter_color = shutter.get('ShutterColour', 'COTTON WHITE').upper()
+                    item.set("ShutterColour", shutter_color)
+                    item.set("LouvreSize", shutter.get('LouvreSize', '63mm'))
+                    item.set("Width", shutter.get('Width', '0'))
+                    item.set("Drop", shutter.get('Drop', '0'))
+                    
+                    # Set ShutterStyle based on midrail presence
+                    has_midrail = shutter.get('Shutter Midrail', 'No').lower() == 'yes'
+                    item.set("ShutterStyle", "DIVIDER RAIL" if has_midrail else "FULL HEIGHT")
+                    
+                    # Calculate and set DivRailPosFirst if midrail is present
+                    if has_midrail:
+                        length = int(convert_to_mm(shutter.get('Length', '0')))
+                        div_rail_pos = (length // 2) + 23
+                        item.set("DivRailPosFirst", str(div_rail_pos))
+                    
+                    item.set("WindowDepth", extract_numeric(shutter.get('Bead Depth', '22')))
+                    item.set("UrbanShutterOption", shutter.get('UrbanShutterOption', 'Urban Shutter Lite - Stiles Only'))
+                    item.set("WindowHandleCentered", shutter.get('WindowHandleCentered', 'No'))
+                    
+                    handle_rebate_position = shutter.get('Handle Location', 'None')
+                    item.set("HandleRebatePosition", handle_rebate_position)
+                    
+                    if handle_rebate_position.lower() != 'none':
+                        handle_position = shutter.get('Handle Position', '0')
+                        custom_handle_rebate_position = calculate_custom_handle_rebate_position(handle_position, handle_rebate_position)
+                        item.set("CustomHandleRebatePosition", custom_handle_rebate_position)
+
+                        if custom_handle_rebate_position == 'centre':
+                            item.set("WindowHandleCentered", "Yes")
+                        else:
+                            item.set("WindowHandleCentered", "No")
+                            item.set("CustomHandleRebatePosition", custom_handle_rebate_position)
+                    
+                    item.set("Buildout", shutter.get('Buildout', 'None'))
+                    item.set("TiltBarSplit1", extract_numeric(shutter.get('TiltBarSplit1', '0')))
+                    item.set("TiltBarSplit2", extract_numeric(shutter.get('TiltBarSplit2', '0')))
+                    item.set("RailSize", shutter.get('RailSize', '50mm'))
+                    item.set("ClosingSystem", shutter.get('ClosingSystem', 'SpringCatch'))
+                    
+                    if 'Blind Location' in shutter:
+                        item.set("BlindLocation", shutter['Blind Location'])
+                    
+                    shutter_data = calculate_shutter_components(shutter)
+                    shutter_data['Order Number'] = cust_order_ref
+                    shutter_data['Panel Configuration'] = panel_config
+                    shutter_data['Customer Name'] = customer_name
+                    shutter_data['Blind Location'] = shutter.get('Blind Location', '')
+                    shutter_data['Colour'] = shutter_color
+                    
+                    safe_customer_name = "".join(x for x in customer_name if x.isalnum() or x in [' ', '_']).rstrip()
+                    excel_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output", f'{safe_customer_name}_shutter_{item_number}.xlsx')
+                    
+                    # Generate worksheet with is_first_sheet flag for the first item only
+                    generate_shutter_worksheet(
+                        shutter_data, 
+                        excel_file_path, 
+                        delivery_option,
+                        is_first_sheet=(item_number == 1)
+                    )
+
+                    print_excel_file(excel_file_path)
+                    
+                    item_number += 1
+
+        tree = ET.ElementTree(root)
+
+        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+        os.makedirs(output_dir, exist_ok=True)
+
+        safe_customer_name = "".join(x for x in customer_name if x.isalnum() or x in [' ', '_']).rstrip()
+        xml_filename = f"{safe_customer_name}_shutters.xml"
+        file_path = os.path.join(output_dir, xml_filename)
+
+        tree.write(file_path, encoding="utf-8", xml_declaration=True)
+
+        logging.info(f"XML file created successfully: {file_path}")
+        return file_path
+
+    except Exception as e:
+        logging.error(f"Error creating XML file for {customer_name}: {str(e)}")
+        return None
+
+def print_excel_file(file_path):
+    try:
+        logging.info(f"Excel file created: {file_path}")
+    except Exception as e:
+        logging.error(f"Error creating Excel file {file_path}: {str(e)}")
+
+def main():
+    driver = webdriver.Chrome()
+    driver.maximize_window()
+    wait = WebDriverWait(driver, 10)
+
+    driver.get("https://www.emeraldblindsandcurtains.co.uk/z-admin/login/")
+    username_field = driver.find_element(By.CLASS_NAME, "form-control[name='email']")
+    password_field = driver.find_element(By.CLASS_NAME, "form-control[name='password']")
+    username_field.send_keys("shaun_mcgrath451@btinternet.com")
+    password_field.send_keys("zBURS0MzzJ@gwTyiLzGIHgObkChm")
+    password_field.send_keys(Keys.RETURN)
+
+    order_urls = [
+        "https://www.emeraldblindsandcurtains.co.uk/z-admin/orders/view/6699/",
+        # Add more order URLs as needed
+    ]
+
+    for specific_order_url in order_urls:
+        driver.get(specific_order_url)
+        wait.until(EC.visibility_of_element_located((By.XPATH, '//div[@class="customer-description"]/div[@class="name mb10"]')))
+        customer_name = driver.find_element(By.XPATH, '//div[@class="customer-description"]/div[@class="name mb10"]').text.strip()
+        order_data, customer_notes, delivery_option = extract_order_data(driver, customer_name)
+
+        if order_data:
+            shutter_data = [product for product in order_data if product.get('Product Type') == 'Perfect Fit Shutter']
+            if shutter_data:
+                xml_file_path = handle_perfect_fit_shutters(shutter_data, customer_name, delivery_option)
+                if xml_file_path:
+                    logging.info(f"XML file for Perfect Fit Shutters created: {xml_file_path}")
+                else:
+                    logging.warning("Failed to create XML file for Perfect Fit Shutters")
+            else:
+                logging.info("No Perfect Fit Shutters found in this order")
+        else:
+            logging.warning(f"No valid order data extracted from {specific_order_url}")
+
+    driver.quit()
+
+if __name__ == "__main__":
+    main()
