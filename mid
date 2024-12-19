@@ -12,6 +12,9 @@ from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.worksheet.page import PageMargins
 from datetime import datetime, timedelta
 import json
+import win32com.client
+import win32print
+import win32api
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -564,11 +567,36 @@ def handle_perfect_fit_shutters(order_data, customer_name, delivery_option):
         logging.error(f"Error creating XML file for {customer_name}: {str(e)}")
         return None
 
+
+
 def print_excel_file(file_path):
     try:
-        logging.info(f"Excel file created: {file_path}")
+        # Create Excel application object
+        excel = win32com.client.Dispatch("Excel.Application")
+        excel.Visible = False  # Don't show Excel
+        
+        # Open workbook
+        wb = excel.Workbooks.Open(os.path.abspath(file_path))
+        
+        # Set print area to used range
+        ws = wb.Worksheets(1)  # First worksheet
+        ws.PageSetup.Zoom = False  # Disable zoom
+        ws.PageSetup.FitToPagesWide = 1  # Fit to 1 page wide
+        ws.PageSetup.FitToPagesTall = 1  # Fit to 1 page tall
+        
+        # Print
+        printer_name = win32print.GetDefaultPrinter()
+        ws.PrintOut(ActivePrinter=printer_name)
+        
+        # Close without saving
+        wb.Close(SaveChanges=False)
+        excel.Quit()
+        
+        logging.info(f"Sent Excel file to printer: {file_path}")
+        
     except Exception as e:
-        logging.error(f"Error creating Excel file {file_path}: {str(e)}")
+        logging.error(f"Error printing Excel file {file_path}: {str(e)}")
+        return None
 
 def main():
     driver = webdriver.Chrome()
