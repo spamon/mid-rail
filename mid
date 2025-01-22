@@ -14,7 +14,11 @@ from datetime import datetime, timedelta
 import json
 import win32api
 import win32print
-
+import win32com.client
+import win32print
+import win32api
+import os
+import time
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -46,6 +50,7 @@ def extract_numeric(value):
     match = re.search(r'\d+\.?\d*', str(value))
     return match.group() if match else "0"
 
+# Current problematic function
 def convert_to_mm(value):
     if value is None:
         return "0"
@@ -70,8 +75,43 @@ def convert_to_mm(value):
         numeric_value = ''.join(char for char in value_str if char.isdigit() or char == '.')
         float_value = float(numeric_value)
         
-        # If value is less than 200 and not in inches, assume it's in cm
-        if float_value < 200:
+        # If value is less than 100 and not in inches, assume it's in cm
+        if float_value < 100:  # This is the problem - 175.3 cm is greater than 100
+            float_value *= 10
+            
+        return str(round(float_value))
+        
+    except ValueError:
+        logging.warning(f"Invalid measurement value: {value}")
+        return "0"
+
+# Fixed version
+def convert_to_mm(value):
+    if value is None:
+        return "0"
+    
+    # Convert value to string and clean it
+    value_str = str(value).lower().strip()
+    
+    # Early return if empty
+    if not value_str:
+        return "0"
+    
+    try:
+        # Check for inches notation
+        if '"' in value_str or 'inch' in value_str or 'inches' in value_str:
+            numeric_value = ''.join(char for char in value_str if char.isdigit() or char == '.')
+            mm_value = float(numeric_value) * 25.4
+            return str(round(mm_value))
+        
+        # Extract numeric value
+        numeric_value = ''.join(char for char in value_str if char.isdigit() or char == '.')
+        float_value = float(numeric_value)
+        
+        # Check if the value contains 'cm' or is likely to be in cm (has decimal points)
+        if 'cm' in value_str or '.' in value_str:
+            float_value *= 10
+        elif float_value < 100:  # For small whole numbers without units, assume cm
             float_value *= 10
             
         return str(round(float_value))
@@ -504,7 +544,7 @@ def handle_perfect_fit_shutters(order_data, customer_name, delivery_option):
                     # Calculate and set DivRailPosFirst if midrail is present
                     if has_midrail:
                         length = int(convert_to_mm(shutter.get('Length', '0')))
-                        div_rail_pos = (length // 2)  # Removed +23
+                        div_rail_pos = (length // 2) # Removed +23
                         item.set("DivRailPosFirst", str(div_rail_pos))
                     
                     item.set("WindowDepth", extract_numeric(shutter.get('Bead Depth', '22')))
@@ -583,10 +623,6 @@ def handle_perfect_fit_shutters(order_data, customer_name, delivery_option):
         logging.error(f"Error creating XML file for {customer_name}: {str(e)}")
         return None
 
-import win32com.client
-import win32print
-import win32api
-import os
 
 def print_excel_file(file_path):
     try:
@@ -637,17 +673,21 @@ def main():
     wait = WebDriverWait(driver, 10)
 
     driver.get("https://www.emeraldblindsandcurtains.co.uk/z-admin/login/")
+    
     username_field = driver.find_element(By.CLASS_NAME, "form-control[name='email']")
     password_field = driver.find_element(By.CLASS_NAME, "form-control[name='password']")
     username_field.send_keys("shaun_mcgrath451@btinternet.com")
-    password_field.send_keys("zBURS0MzzJ@gwTyiLzGIHgObkChm")
+    password_field.send_keys("aIx@I@*zkAauG8*XzpXzdzayKI95")
     password_field.send_keys(Keys.RETURN)
+   
 
     order_urls = [
-        "https://www.emeraldblindsandcurtains.co.uk/z-admin/orders/view/6699/",
+        "https://www.emeraldblindsandcurtains.co.uk/z-admin/orders/view/7357/",
+    
+    
         # Add more order URLs as needed
     ]
-
+    time.sleep(1)
     for specific_order_url in order_urls:
         driver.get(specific_order_url)
         wait.until(EC.visibility_of_element_located((By.XPATH, '//div[@class="customer-description"]/div[@class="name mb10"]')))
